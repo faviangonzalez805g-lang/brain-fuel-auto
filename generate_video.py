@@ -95,4 +95,75 @@ if bg_path and os.path.exists(bg_path):
         bg = bg.resize((WIDTH, HEIGHT))
     bg = bg.set_duration(duration)
 else:
-    # fallback solid
+    # fallback solid background
+    bg = ColorClip(size=(WIDTH, HEIGHT), color=(10, 10, 10), duration=duration)
+
+# 3) Build readable captions image (no cut-off)
+wrapped = textwrap.fill(SCRIPT, width=MAX_TEXT_WIDTH_CHARS)
+
+img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+draw = ImageDraw.Draw(img)
+
+# Caption area excludes branding bar
+caption_box_w = WIDTH - 2 * SIDE_MARGIN
+caption_box_h = HEIGHT - TOP_MARGIN - BRAND_BAR_H - 120
+
+font = fit_text(
+    draw,
+    wrapped,
+    FONT_PATH,
+    max_width_px=caption_box_w,
+    max_height_px=caption_box_h,
+    start_size=72,
+    min_size=34
+)
+
+# Add a subtle shadow + stroke effect for readability
+bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10, align="center")
+text_w = bbox[2] - bbox[0]
+text_h = bbox[3] - bbox[1]
+
+x = (WIDTH - text_w) // 2
+y = TOP_MARGIN + (caption_box_h - text_h) // 2
+
+# Shadow
+draw.multiline_text((x+3, y+3), wrapped, font=font, fill=(0, 0, 0, 180), spacing=10, align="center")
+# Main text
+draw.multiline_text((x, y), wrapped, font=font, fill=(255, 255, 255, 255), spacing=10, align="center")
+
+img.save("captions.png")
+captions_clip = ImageClip("captions.png").set_duration(duration)
+
+# 4) Branding bar with color
+bar = ColorClip(size=(WIDTH, BRAND_BAR_H), color=(20, 120, 255), duration=duration)  # blue bar
+bar = bar.set_position((0, HEIGHT - BRAND_BAR_H))
+
+# Branding text on top of bar
+brand_img = Image.new("RGBA", (WIDTH, BRAND_BAR_H), (0, 0, 0, 0))
+brand_draw = ImageDraw.Draw(brand_img)
+brand_font = ImageFont.truetype(FONT_PATH, 34)
+
+bt_bbox = brand_draw.textbbox((0, 0), BRAND_TEXT, font=brand_font)
+bt_w = bt_bbox[2] - bt_bbox[0]
+bt_h = bt_bbox[3] - bt_bbox[1]
+bt_x = (WIDTH - bt_w) // 2
+bt_y = (BRAND_BAR_H - bt_h) // 2
+
+# slight shadow
+brand_draw.text((bt_x+2, bt_y+2), BRAND_TEXT, font=brand_font, fill=(0, 0, 0, 140))
+brand_draw.text((bt_x, bt_y), BRAND_TEXT, font=brand_font, fill=(255, 255, 255, 255))
+
+brand_img.save("brand.png")
+brand_text_clip = ImageClip("brand.png").set_duration(duration).set_position((0, HEIGHT - BRAND_BAR_H))
+
+# 5) Composite + audio
+final = CompositeVideoClip([bg, captions_clip, bar, brand_text_clip]).set_audio(audio)
+
+final.write_videofile(
+    OUTPUT_VIDEO,
+    fps=30,
+    codec="libx264",
+    audio_codec="aac"
+)
+
+print("✅ Video generated:", OUTPUT_VIDEO, "duration:", duration)
