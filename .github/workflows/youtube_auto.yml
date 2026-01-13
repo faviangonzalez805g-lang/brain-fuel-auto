@@ -2,7 +2,7 @@ name: Brain Fuel YouTube Auto Upload
 
 on:
   schedule:
-    - cron: "0 14 * * *"   # once per day (can increase later)
+    - cron: "0 14 * * *"   # once per day (change later)
   workflow_dispatch:
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
           python -m pip install imageio imageio-ffmpeg numpy
           python -m pip install google-api-python-client google-auth google-auth-oauthlib gtts
 
-      - name: Generate test video
+      - name: Generate video
         run: |
           python generate_video.py
 
@@ -38,5 +38,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: brain-fuel-video
-         path: brain_fuel_final.mp4
-
+          path: brain_fuel_final.mp4
