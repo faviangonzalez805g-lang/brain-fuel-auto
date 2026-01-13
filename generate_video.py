@@ -1,4 +1,5 @@
 import os
+import subprocess
 import textwrap
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
@@ -17,8 +18,8 @@ FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 MAIN_FONT_SIZE = 64
 BRAND_FONT_SIZE = 40
 
-TARGET_SECONDS = 62        # Always 60+ (62 safe)
-VOICE_SPEED = 1.12         # faster voice (1.08–1.20 range)
+TARGET_SECONDS = 62
+VOICE_SPEED = 1.12
 
 SCRIPT = (
     "Your brain treats uncertainty like danger. "
@@ -41,33 +42,29 @@ FINAL_OUT = "brain_fuel_final.mp4"
 # ===================================================
 
 
-def run(cmd: str):
-    """Run shell command quietly."""
-    os.system(cmd + " >/dev/null 2>&1")
+def sh(cmd_list):
+    subprocess.run(cmd_list, check=True)
 
 
-# ---------- 1) Generate voice ----------
+# ---------- 1) Voice ----------
 gTTS(SCRIPT, slow=False).save("voice_raw.mp3")
 
-# Speed up voice with ffmpeg (stable)
-run(f'ffmpeg -y -i voice_raw.mp3 -filter:a "atempo={VOICE_SPEED}" voice_fast.mp3')
+# Speed up
+sh(["ffmpeg", "-y", "-i", "voice_raw.mp3", "-filter:a", f"atempo={VOICE_SPEED}", "voice_fast.mp3"])
 
-# Pad/truncate voice to EXACT duration using silence
-run(f'ffmpeg -y -i voice_fast.mp3 -af "apad=pad_dur={TARGET_SECONDS}" -t {TARGET_SECONDS} voice.mp3')
+# Pad/truncate to EXACT duration
+sh(["ffmpeg", "-y", "-i", "voice_fast.mp3", "-af", f"apad=pad_dur={TARGET_SECONDS}", "-t", str(TARGET_SECONDS), "voice.mp3"])
 
 voice = AudioFileClip("voice.mp3").set_duration(TARGET_SECONDS)
 duration = TARGET_SECONDS
 
 
-# ---------- 2) Animated background (guaranteed visuals) ----------
-# Dark base + slow zoom
+# ---------- 2) Background (guaranteed visuals) ----------
 background = (
     ColorClip(size=(WIDTH, HEIGHT), color=(12, 12, 12), duration=duration)
     .fx(vfx.resize, lambda t: 1.02 + 0.02 * (t / duration))
     .set_position("center")
 )
-
-# Subtle blue overlay to feel “alive”
 overlay = ColorClip(size=(WIDTH, HEIGHT), color=(0, 90, 180), duration=duration).set_opacity(0.10)
 
 
@@ -82,31 +79,14 @@ wrapped = textwrap.fill(SCRIPT, width=36)
 
 bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10, align="center")
 text_w = bbox[2] - bbox[0]
-text_h = bbox[3] - bbox[1]
-
-# Lower-middle placement
 text_x = (WIDTH - text_w) // 2
 text_y = int(HEIGHT * 0.40)
 
-# Shadow then yellow text
-draw.multiline_text(
-    (text_x + 3, text_y + 3),
-    wrapped,
-    font=font,
-    fill=(0, 0, 0, 190),
-    spacing=10,
-    align="center"
-)
-draw.multiline_text(
-    (text_x, text_y),
-    wrapped,
-    font=font,
-    fill=(255, 225, 0, 255),
-    spacing=10,
-    align="center"
-)
+# shadow + yellow
+draw.multiline_text((text_x + 3, text_y + 3), wrapped, font=font, fill=(0, 0, 0, 190), spacing=10, align="center")
+draw.multiline_text((text_x, text_y), wrapped, font=font, fill=(255, 225, 0, 255), spacing=10, align="center")
 
-# ---------- 4) Branding bar ----------
+# brand bar
 bar_h = 120
 bar = Image.new("RGBA", (WIDTH, bar_h), (20, 120, 255, 255))
 img.paste(bar, (0, HEIGHT - bar_h))
@@ -123,14 +103,9 @@ img.save("captions.png")
 captions_clip = ImageClip("captions.png").set_duration(duration)
 
 
-# ---------- 5) Compose ----------
-final = (
-    CompositeVideoClip([background, overlay, captions_clip])
-    .set_audio(voice)
-    .set_duration(duration)
-)
+# ---------- 4) Compose ----------
+final = CompositeVideoClip([background, overlay, captions_clip]).set_audio(voice).set_duration(duration)
 
-# Write initial mp4
 final.write_videofile(
     RAW_OUT,
     fps=30,
@@ -138,15 +113,26 @@ final.write_videofile(
     audio_codec="aac"
 )
 
-# ---------- 6) Re-encode for universal playback ----------
-# This fixes "video doesn't play / nothing happens" on iPhone/GitHub previews.
-run(
-    f'ffmpeg -y -i {RAW_OUT} '
-    f'-c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.1 '
-    f'-c:a aac -b:a 192k -movflags +faststart '
-    f'{FINAL_OUT}'
-)
+# ---------- 5) Re-encode for MAX compatibility (Windows/iPhone) ----------
+# Baseline profile plays on basically everything.
+# yuv420p is required for many players.
+sh([
+    "ffmpeg", "-y", "-i", RAW_OUT,
+    "-r", "30",
+    "-c:v", "libx264",
+    "-profile:v", "baseline",
+    "-level", "3.0",
+    "-pix_fmt", "yuv420p",
+    "-movflags", "+faststart",
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-ar", "44100",
+    "-ac", "2",
+    FINAL_OUT
+])
 
-print("✅ Done!")
-print("RAW:", RAW_OUT)
-print("FINAL (playable):", FINAL_OUT)
+# Sanity check file exists and has size
+size = os.path.getsize(FINAL_OUT)
+print("✅ FINAL MP4:", FINAL_OUT, "bytes:", size)
+if size < 100000:  # <100KB is basically broken
+    raise RuntimeError("Final video file is too small / likely corrupted.")
