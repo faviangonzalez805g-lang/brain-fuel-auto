@@ -2,7 +2,7 @@ name: Brain Fuel YouTube Auto Upload
 
 on:
   schedule:
-    - cron: "0 14 * * *"
+    - cron: "0 14 * * *"   # once per day for now; we'll increase later
   workflow_dispatch:
 
 jobs:
@@ -21,9 +21,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg imagemagick fonts-dejavu-core
           python -m pip install --upgrade pip
-          python -m pip install --upgrade moviepy imageio imageio-ffmpeg numpy pillow
+          python -m pip install "moviepy==1.0.3" imageio imageio-ffmpeg numpy pillow
           python -m pip install google-api-python-client google-auth google-auth-oauthlib gtts
 
       - name: Generate test video
