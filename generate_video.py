@@ -1,4 +1,4 @@
-import os, math, random, textwrap
+import os, math, textwrap
 import numpy as np
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
@@ -10,11 +10,10 @@ from moviepy.editor import (
 WIDTH, HEIGHT = 1080, 1920
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
-TARGET_SECONDS = 62             # 60+ seconds
-VOICE_SPEED = 1.15              # faster speech
+TARGET_SECONDS = 62        # 60+ seconds
+VOICE_SPEED = 1.15         # faster speech
 FPS = 30
 
-# Keep script ~60s at faster speed (add more lines if needed)
 SCRIPT = (
     "Your brain treats uncertainty like danger. "
     "When you don’t know what’s next, stress turns on automatically. "
@@ -34,23 +33,21 @@ OUTFILE = "brain_fuel_final.mp4"
 # ===================================================
 
 def sh(cmd: str):
+    # quiet shell command
     os.system(cmd + " >/dev/null 2>&1")
 
-# ---------- 1) Voice: generate + speed up ----------
+# ---------- 1) VOICE ----------
 gTTS(SCRIPT, slow=False).save("voice_raw.mp3")
 
-# Speed up (atempo) -> voice_fast.mp3
+# Speed up voice
 sh(f'ffmpeg -y -i voice_raw.mp3 -filter:a "atempo={VOICE_SPEED}" voice_fast.mp3')
 
-# LOOP voice to full length (so it keeps talking the whole minute)
-# This repeats the same audio if it's short. Later we can generate longer scripts automatically.
-sh(
-    f'ffmpeg -y -stream_loop -1 -i voice_fast.mp3 -t {TARGET_SECONDS} '
-    f'-c copy voice_loop.mp3'
-)
+# Loop voice to full duration so it keeps talking (no silence)
+# Try stream-copy first (fast)
+sh(f'ffmpeg -y -stream_loop -1 -i voice_fast.mp3 -t {TARGET_SECONDS} -c copy voice_loop.mp3')
 
-# If stream copy ever fails, re-encode safely:
-if not os.path.exists("voice_loop.mp3") or os.path.getsize("voice_loop.mp3") < 10000:
+# If stream-copy fails, re-encode
+if (not os.path.exists("voice_loop.mp3")) or os.path.getsize("voice_loop.mp3") < 10000:
     sh(
         f'ffmpeg -y -stream_loop -1 -i voice_fast.mp3 -t {TARGET_SECONDS} '
         f'-c:a libmp3lame -q:a 4 voice_loop.mp3'
@@ -58,41 +55,42 @@ if not os.path.exists("voice_loop.mp3") or os.path.getsize("voice_loop.mp3") < 1
 
 voice = AudioFileClip("voice_loop.mp3").set_duration(TARGET_SECONDS)
 
-# ---------- 2) Generate a moving background (FREE visuals) ----------
-# Neon wave gradient animation created in code (no downloads)
+# ---------- 2) BACKGROUND VISUALS (NEON WAVES, FREE) ----------
 def make_bg_frame(t):
     h, w = HEIGHT, WIDTH
-    y = np.linspace(0, 1, h).reshape(h, 1)
-    x = np.linspace(0, 1, w).reshape(1, w)
 
-    # base dark
-    base = 10 + 10 * (1 - y)
+    # full grids (H,W)
+    yy = np.linspace(0, 1, h).reshape(h, 1)
+    xx = np.linspace(0, 1, w).reshape(1, w)
+    Y = np.repeat(yy, w, axis=1)
+    X = np.repeat(xx, h, axis=0)
 
-    # moving waves
-    wave1 = 50 * (np.sin(2 * math.pi * (x * 1.2 + t * 0.03)) * 0.5 + 0.5)
-    wave2 = 35 * (np.sin(2 * math.pi * (y * 1.7 - t * 0.04)) * 0.5 + 0.5)
+    # base dark gradient
+    base = 12 + 18 * (1 - Y)
 
-    # colors (blue/purple neon)
-    r = base + 0.2 * wave2
-    g = base + 0.6 * wave1
-    b = base + 1.2 * wave1 + 0.6 * wave2
+    # moving neon waves
+    wave1 = 70 * (np.sin(2 * math.pi * (X * 1.2 + t * 0.05)) * 0.5 + 0.5)
+    wave2 = 55 * (np.sin(2 * math.pi * (Y * 1.6 - t * 0.06)) * 0.5 + 0.5)
 
-    frame = np.clip(np.stack([r, g, b], axis=2), 0, 255).astype(np.uint8)
+    # RGB channels
+    r = base + 0.25 * wave2
+    g = base + 0.55 * wave1
+    b = base + 1.15 * wave1 + 0.55 * wave2
+
+    frame = np.clip(np.dstack([r, g, b]), 0, 255).astype(np.uint8)
     return frame
 
 bg = VideoClip(make_bg_frame, duration=TARGET_SECONDS).set_fps(FPS)
 
-# ---------- 3) Text that NEVER goes off-screen ----------
-# Smaller font, safe margins, auto-wrap
-font = ImageFont.truetype(FONT_PATH, 54)          # smaller so it fits
-brand_font = ImageFont.truetype(FONT_PATH, 34)    # smaller so it fits on bar
+# ---------- 3) TEXT (FIT + NO OFFSCREEN) ----------
+font = ImageFont.truetype(FONT_PATH, 54)      # smaller so it fits
+draw_test = ImageDraw.Draw(Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0)))
 
 MARGIN_X = 80
-TOP_Y = int(HEIGHT * 0.22)   # put text lower like you asked
+TOP_Y = int(HEIGHT * 0.24)                    # text a bit lower like you asked
 MAX_TEXT_WIDTH = WIDTH - (MARGIN_X * 2)
 
 def wrap_to_width(draw, text, font, max_width):
-    # wrap by words to fit max_width
     words = text.split()
     lines = []
     line = ""
@@ -101,22 +99,21 @@ def wrap_to_width(draw, text, font, max_width):
         if draw.textlength(test, font=font) <= max_width:
             line = test
         else:
-            lines.append(line)
+            if line:
+                lines.append(line)
             line = w
     if line:
         lines.append(line)
     return "\n".join(lines)
 
-# Create transparent caption image once (static captions)
+wrapped = wrap_to_width(draw_test, SCRIPT, font, MAX_TEXT_WIDTH)
+
+# Create caption overlay image
 img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
 draw = ImageDraw.Draw(img)
 
-wrapped = wrap_to_width(draw, SCRIPT, font, MAX_TEXT_WIDTH)
-
-# Measure and center
 bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=14, align="center")
 tw = bbox[2] - bbox[0]
-th = bbox[3] - bbox[1]
 tx = (WIDTH - tw) // 2
 ty = TOP_Y
 
@@ -140,33 +137,33 @@ draw.multiline_text(
     align="center"
 )
 
-# ---------- 4) Branding bar (auto-fit, no cut off) ----------
+# ---------- 4) BRAND BAR (AUTO-FIT, NO CUT OFF) ----------
 bar_h = 120
-bar = Image.new("RGBA", (WIDTH, bar_h), (10, 90, 200, 230))
+bar_color = (10, 90, 200, 230)
+bar = Image.new("RGBA", (WIDTH, bar_h), bar_color)
 img.paste(bar, (0, HEIGHT - bar_h))
 
-# auto-shrink brand font if still too wide
+# start bigger then shrink until fits
 bf_size = 34
 while True:
     brand_font = ImageFont.truetype(FONT_PATH, bf_size)
     bw = draw.textlength(BRAND_TEXT, font=brand_font)
-    if bw <= WIDTH - 60 or bf_size <= 24:
+    if bw <= WIDTH - 60 or bf_size <= 22:
         break
     bf_size -= 1
 
 bx = int((WIDTH - bw) // 2)
 by = HEIGHT - bar_h + 38
 
-# shadow + white
 draw.text((bx + 2, by + 2), BRAND_TEXT, font=brand_font, fill=(0, 0, 0, 140))
 draw.text((bx, by), BRAND_TEXT, font=brand_font, fill=(255, 255, 255, 255))
 
 img.save("captions.png")
 captions = ImageClip("captions.png").set_duration(TARGET_SECONDS)
 
-# ---------- 5) Compose + export ----------
+# ---------- 5) COMPOSE + EXPORT ----------
 final = CompositeVideoClip([bg, captions], size=(WIDTH, HEIGHT)).set_audio(voice)
-final = final.fx(vfx.resize, newsize=(WIDTH, HEIGHT))  # keeps even dimensions
+final = final.fx(vfx.resize, newsize=(WIDTH, HEIGHT))  # keep exact even size
 
 final.write_videofile(
     OUTFILE,
