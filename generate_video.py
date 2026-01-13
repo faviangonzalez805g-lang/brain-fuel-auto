@@ -170,4 +170,107 @@ def make_brand_png():
     # line 1
     b1 = BRAND_TEXT_1
     b1_bbox = draw.textbbox((0, 0), b1, font=font)
-    b1_w_
+    b1_w = b1_bbox[2] - b1_bbox[0]
+    b1_x = (w - b1_w) // 2
+    b1_y = 22
+
+    # line 2
+    b2 = BRAND_TEXT_2
+    b2_bbox = draw.textbbox((0, 0), b2, font=font)
+    b2_w = b2_bbox[2] - b2_bbox[0]
+    b2_x = (w - b2_w) // 2
+    b2_y = 82
+
+    # shadow + text
+    for (tx, ty, t) in [(b1_x, b1_y, b1), (b2_x, b2_y, b2)]:
+        draw.text((tx+2, ty+2), t, font=font, fill=(0, 0, 0, 140))
+        draw.text((tx, ty), t, font=font, fill=(255, 255, 255, 255))
+
+    out = "brand.png"
+    img.save(out)
+    return out
+
+
+# ----------------- MAIN -----------------
+script = build_script_to_target()
+
+# 1) TTS -> voice.mp3
+gTTS(script).save("voice_raw.mp3")
+
+# 2) Speed up voice (FFmpeg) -> voice.mp3
+# atempo supports 0.5–2.0 per filter; we're in range
+os.system(f'ffmpeg -y -i voice_raw.mp3 -filter:a "atempo={VOICE_SPEED}" voice.mp3 >/dev/null 2>&1')
+
+audio = AudioFileClip("voice.mp3")
+
+# 3) If still short, extend script by adding extra lines
+# (Simple loop: if voice is < TARGET_SECONDS, append two extra tips)
+if audio.duration < TARGET_SECONDS:
+    extra = " ".join([
+        "One more thing: your brain follows what you repeatedly see.",
+        "So put reminders in your environment, not in your memory.",
+        "Follow Brain Fuel Media for daily mind shifts."
+    ])
+    script = script + " " + extra
+    gTTS(script).save("voice_raw.mp3")
+    os.system(f'ffmpeg -y -i voice_raw.mp3 -filter:a "atempo={VOICE_SPEED}" voice.mp3 >/dev/null 2>&1')
+    audio = AudioFileClip("voice.mp3")
+
+duration = min(max(audio.duration, 40), 60)  # clamp to 40–60
+
+# 4) Background video download + loop to duration
+bg_path = download_bg_video()
+
+if bg_path and Path(bg_path).exists():
+    raw = VideoFileClip(bg_path)
+    # Make vertical + crop
+    raw = raw.resize(height=HEIGHT)
+    if raw.w > WIDTH:
+        x1 = (raw.w - WIDTH) // 2
+        raw = raw.crop(x1=x1, y1=0, x2=x1 + WIDTH, y2=HEIGHT)
+    else:
+        raw = raw.resize((WIDTH, HEIGHT))
+
+    # Loop
+    clips = []
+    t = 0
+    while t < duration:
+        seg = raw.subclip(0, min(raw.duration, duration - t))
+        clips.append(seg)
+        t += seg.duration
+    bg = concatenate_videoclips(clips).set_duration(duration)
+else:
+    bg = ColorClip(size=(WIDTH, HEIGHT), color=(10, 10, 10), duration=duration)
+
+# Darken overlay for readability
+dark = ColorClip(size=(WIDTH, HEIGHT), color=(0, 0, 0), duration=duration).set_opacity(BG_DARKEN_ALPHA / 255)
+
+# 5) Sentence highlight timing (simple)
+sentences = split_sentences(script)
+per_sentence = duration / max(len(sentences), 1)
+
+caption_layers = []
+full_text = script
+
+for i, s in enumerate(sentences):
+    start = i * per_sentence
+    end = min((i + 1) * per_sentence, duration)
+    png = make_caption_png(full_text, highlight_sentence=s)
+    clip = ImageClip(png).set_start(start).set_end(end)
+    caption_layers.append(clip)
+
+# 6) Branding bar
+brand_png = make_brand_png()
+brand_clip = ImageClip(brand_png).set_duration(duration).set_position((0, HEIGHT - BRAND_BAR_H))
+
+# 7) Composite
+final = CompositeVideoClip([bg, dark, *caption_layers, brand_clip]).set_audio(audio).set_duration(duration)
+
+final.write_videofile(
+    "brain_fuel_test.mp4",
+    fps=30,
+    codec="libx264",
+    audio_codec="aac"
+)
+
+print("✅ Video generated:", "brain_fuel_test.mp4", "duration:", duration)
