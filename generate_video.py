@@ -17,8 +17,8 @@ FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 MAIN_FONT_SIZE = 64
 BRAND_FONT_SIZE = 40
 
-TARGET_SECONDS = 62        # ALWAYS 60+ (62 is safe)
-VOICE_SPEED = 1.12         # faster
+TARGET_SECONDS = 62        # Always 60+ (62 safe)
+VOICE_SPEED = 1.12         # faster voice (1.08–1.20 range)
 
 SCRIPT = (
     "Your brain treats uncertainty like danger. "
@@ -35,39 +35,43 @@ SCRIPT = (
 )
 
 BRAND_TEXT = "YouTube: Brain Fuel Media   |   IG/TikTok: @Brain.FuelMedia"
-OUTPUT_VIDEO = "brain_fuel_test.mp4"
+
+RAW_OUT = "brain_fuel_test.mp4"
+FINAL_OUT = "brain_fuel_final.mp4"
 # ===================================================
+
+
+def run(cmd: str):
+    """Run shell command quietly."""
+    os.system(cmd + " >/dev/null 2>&1")
 
 
 # ---------- 1) Generate voice ----------
 gTTS(SCRIPT, slow=False).save("voice_raw.mp3")
 
-# Speed up using ffmpeg (more reliable than moviepy speedx)
-os.system(
-    f'ffmpeg -y -i voice_raw.mp3 -filter:a "atempo={VOICE_SPEED}" voice_fast.mp3 >/dev/null 2>&1'
-)
+# Speed up voice with ffmpeg (stable)
+run(f'ffmpeg -y -i voice_raw.mp3 -filter:a "atempo={VOICE_SPEED}" voice_fast.mp3')
 
-# Pad/truncate to EXACTLY TARGET_SECONDS using silence (THIS FIXES YOUR ERROR)
-os.system(
-    f'ffmpeg -y -i voice_fast.mp3 -af "apad=pad_dur={TARGET_SECONDS}" -t {TARGET_SECONDS} voice.mp3 >/dev/null 2>&1'
-)
+# Pad/truncate voice to EXACT duration using silence
+run(f'ffmpeg -y -i voice_fast.mp3 -af "apad=pad_dur={TARGET_SECONDS}" -t {TARGET_SECONDS} voice.mp3')
 
 voice = AudioFileClip("voice.mp3").set_duration(TARGET_SECONDS)
 duration = TARGET_SECONDS
 
 
 # ---------- 2) Animated background (guaranteed visuals) ----------
+# Dark base + slow zoom
 background = (
     ColorClip(size=(WIDTH, HEIGHT), color=(12, 12, 12), duration=duration)
     .fx(vfx.resize, lambda t: 1.02 + 0.02 * (t / duration))
     .set_position("center")
 )
 
-# Slight overlay to make it feel more “alive”
-overlay = ColorClip(size=(WIDTH, HEIGHT), color=(0, 80, 160), duration=duration).set_opacity(0.08)
+# Subtle blue overlay to feel “alive”
+overlay = ColorClip(size=(WIDTH, HEIGHT), color=(0, 90, 180), duration=duration).set_opacity(0.10)
 
 
-# ---------- 3) Build captions image ----------
+# ---------- 3) Captions image ----------
 img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
 draw = ImageDraw.Draw(img)
 
@@ -80,11 +84,11 @@ bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10, align="ce
 text_w = bbox[2] - bbox[0]
 text_h = bbox[3] - bbox[1]
 
-# Lower-middle position
+# Lower-middle placement
 text_x = (WIDTH - text_w) // 2
 text_y = int(HEIGHT * 0.40)
 
-# Yellow text with shadow
+# Shadow then yellow text
 draw.multiline_text(
     (text_x + 3, text_y + 3),
     wrapped,
@@ -126,11 +130,23 @@ final = (
     .set_duration(duration)
 )
 
+# Write initial mp4
 final.write_videofile(
-    OUTPUT_VIDEO,
+    RAW_OUT,
     fps=30,
     codec="libx264",
     audio_codec="aac"
 )
 
-print("✅ Video rendered successfully:", OUTPUT_VIDEO, "duration:", duration)
+# ---------- 6) Re-encode for universal playback ----------
+# This fixes "video doesn't play / nothing happens" on iPhone/GitHub previews.
+run(
+    f'ffmpeg -y -i {RAW_OUT} '
+    f'-c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.1 '
+    f'-c:a aac -b:a 192k -movflags +faststart '
+    f'{FINAL_OUT}'
+)
+
+print("✅ Done!")
+print("RAW:", RAW_OUT)
+print("FINAL (playable):", FINAL_OUT)
