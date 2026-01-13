@@ -2,7 +2,7 @@ name: Brain Fuel YouTube Auto Upload
 
 on:
   schedule:
-    - cron: "0 14 * * *"   # once per day (change later)
+    - cron: "0 14 * * *"
   workflow_dispatch:
 
 jobs:
@@ -23,16 +23,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-dejavu-core
 
-      - name: Install Python dependencies (PINNED & SAFE)
+      - name: Install Python dependencies (PINNED)
         run: |
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install "moviepy==1.0.3" "pillow==9.5.0"
-          python -m pip install imageio imageio-ffmpeg numpy
-          python -m pip install google-api-python-client google-auth google-auth-oauthlib gtts
+          python -m pip install imageio imageio-ffmpeg numpy gtts
 
       - name: Generate video
         run: |
           python generate_video.py
+
+      - name: Debug info (size + ffprobe)
+        run: |
+          ls -lh *.mp4 || true
+          ffprobe -hide_banner -i brain_fuel_final.mp4 || true
 
       - name: Upload video artifact
         uses: actions/upload-artifact@v4
