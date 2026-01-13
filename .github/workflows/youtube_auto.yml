@@ -38,4 +38,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: brain-fuel-video
-          path: brain_fuel_test.mp4
+         path: brain_fuel_final.mp4
+
