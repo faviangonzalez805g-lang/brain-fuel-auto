@@ -17,7 +17,7 @@ FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 MAIN_FONT_SIZE = 64
 BRAND_FONT_SIZE = 40
 
-DURATION = 62        # always 60+ seconds
+DURATION = 62
 VOICE_SPEED = 1.12
 
 SCRIPT = (
@@ -41,16 +41,16 @@ OUTPUT = "brain_fuel_final.mp4"
 # ---------- 1) Voice ----------
 gTTS(SCRIPT, slow=False).save("voice_raw.mp3")
 
-# speed + pad using ffmpeg (safe)
 os.system(
-    f'ffmpeg -y -i voice_raw.mp3 -filter:a "atempo={VOICE_SPEED},apad=pad_dur={DURATION}" '
+    f'ffmpeg -y -i voice_raw.mp3 '
+    f'-filter:a "atempo={VOICE_SPEED},apad=pad_dur={DURATION}" '
     f'-t {DURATION} voice.mp3 >/dev/null 2>&1'
 )
 
 voice = AudioFileClip("voice.mp3").set_duration(DURATION)
 
 
-# ---------- 2) Animated background ----------
+# ---------- 2) Background ----------
 background = (
     ColorClip((WIDTH, HEIGHT), color=(12, 12, 12), duration=DURATION)
     .fx(vfx.resize, lambda t: 1.02 + 0.02 * (t / DURATION))
@@ -68,7 +68,7 @@ brand_font = ImageFont.truetype(FONT_PATH, BRAND_FONT_SIZE)
 
 wrapped = textwrap.fill(SCRIPT, width=36)
 
-bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10)
+bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10, align="center")
 text_w = bbox[2] - bbox[0]
 text_x = (WIDTH - text_w) // 2
 text_y = int(HEIGHT * 0.40)
@@ -83,7 +83,7 @@ draw.multiline_text(
     align="center"
 )
 
-# yellow text
+# yellow
 draw.multiline_text(
     (text_x, text_y),
     wrapped,
@@ -93,27 +93,27 @@ draw.multiline_text(
     align="center"
 )
 
-# ---------- 4) Branding bar ----------
+# Branding bar
 bar_h = 120
 bar = Image.new("RGBA", (WIDTH, bar_h), (25, 120, 255, 255))
 img.paste(bar, (0, HEIGHT - bar_h))
 
 brand_bbox = draw.textbbox((0, 0), BRAND_TEXT, font=brand_font)
 brand_w = brand_bbox[2] - brand_bbox[0]
+brand_x = (WIDTH - brand_w) // 2
+brand_y = HEIGHT - bar_h + 36
 
-draw.text(
-    ((WIDTH - brand_w) // 2, HEIGHT - bar_h + 36),
-    BRAND_TEXT,
-    font=brand_font,
-    fill="white"
-)
+draw.text((brand_x, brand_y), BRAND_TEXT, font=brand_font, fill="white")
 
 img.save("captions.png")
 captions = ImageClip("captions.png").set_duration(DURATION)
 
 
-# ---------- 5) Final video ----------
-final = CompositeVideoClip([background, overlay, captions]).set_audio(voice)
+# ---------- 4) Final ----------
+final = CompositeVideoClip([background, overlay, captions], size=(WIDTH, HEIGHT)).set_audio(voice)
+
+# FORCE exact even dimensions (fixes libx264 width/height divisible-by-2 errors)
+final = final.fx(vfx.resize, newsize=(WIDTH, HEIGHT))
 
 final.write_videofile(
     OUTPUT,
