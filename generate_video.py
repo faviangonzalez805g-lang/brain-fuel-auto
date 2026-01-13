@@ -1,7 +1,9 @@
 import os
 import random
+import re
 import textwrap
 import urllib.request
+from pathlib import Path
 
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
@@ -11,41 +13,41 @@ from moviepy.editor import (
     AudioFileClip,
     CompositeVideoClip,
     ImageClip,
-    ColorClip
+    ColorClip,
+    concatenate_videoclips
 )
 
 # ---------------- SETTINGS ----------------
-SCRIPT = (
-    "Psychology says your brain avoids uncertainty because it feels unsafe. "
-    "That is why routines reduce stress so fast. "
-    "When your brain knows what comes next, it conserves energy. "
-    "That is why structure improves focus and emotional control. "
-    "Follow Brain Fuel Media for daily psychology that actually helps."
-)
-
 WIDTH, HEIGHT = 1080, 1920
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
-# Text layout
-MAX_TEXT_WIDTH_CHARS = 28     # tighter wrap so it doesn't run off screen
+# Captions area
 TOP_MARGIN = 220
 SIDE_MARGIN = 90
+CAPTION_BOX_W = WIDTH - 2 * SIDE_MARGIN
+BRAND_BAR_H = 150
 
-# Branding bar
-BRAND_BAR_H = 140
-BRAND_TEXT = "YouTube: Brain Fuel Media   |   IG/TikTok: @Brain.FuelMedia"
+# Branding
+BRAND_TEXT_1 = "YouTube: Brain Fuel Media"
+BRAND_TEXT_2 = "IG/TikTok: @Brain.FuelMedia"
 
-OUTPUT_VIDEO = "brain_fuel_test.mp4"
+# Style
+BG_DARKEN_ALPHA = 120  # 0-255. higher = darker overlay behind text
+WHITE = (255, 255, 255, 255)
+YELLOW = (255, 225, 0, 255)
+
+# Voice
+TARGET_SECONDS = 58          # 55-60 is best for Shorts
+VOICE_SPEED = 1.18           # >1 = faster (1.12–1.25 sweet spot)
 # -----------------------------------------
 
 
 def download_bg_video():
     """
-    Downloads a free vertical background video (public domain / Pexels CDN).
-    If it fails, we fall back to a solid background.
+    Downloads a vertical background video clip.
+    If it fails, we fall back to solid background.
     """
     url_options = [
-        # These links can change over time; if one breaks, add another.
         "https://videos.pexels.com/video-files/3195394/3195394-uhd_1440_2560_25fps.mp4",
         "https://videos.pexels.com/video-files/854418/854418-hd_1080_1920_30fps.mp4",
         "https://videos.pexels.com/video-files/2795748/2795748-hd_1080_1920_30fps.mp4",
@@ -59,111 +61,113 @@ def download_bg_video():
         return None
 
 
-def fit_text(draw, text, font_path, max_width_px, max_height_px, start_size=72, min_size=34):
+def build_script_to_target():
     """
-    Finds the largest font size that fits inside the given box.
+    Builds a ~60s script using short, punchy sentences (better retention).
     """
-    size = start_size
+    lines = [
+        "Psychology says your brain treats uncertainty like danger.",
+        "When you don’t know what’s next, your stress system turns on automatically.",
+        "That’s why routines reduce anxiety fast — they make life predictable.",
+        "Predictability tells your brain: you’re safe.",
+        "Here’s the trick: don’t build discipline. Build structure.",
+        "Put the habit where it’s easy to start, and remove the friction.",
+        "Make the first step tiny… like two minutes.",
+        "Your brain only needs a small win to keep going.",
+        "And if you miss a day, don’t restart. Just return.",
+        "Consistency beats intensity every time.",
+        "Follow Brain Fuel Media for daily psychology that actually helps."
+    ]
+    # We'll just join these. If it ends up short after speed-up, we can add more lines.
+    return " ".join(lines)
+
+
+def split_sentences(text: str):
+    # Split into sentences for highlighting
+    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def fit_font(draw, text, max_w, max_h, start=72, min_size=34):
+    size = start
     while size >= min_size:
-        font = ImageFont.truetype(font_path, size)
+        font = ImageFont.truetype(FONT_PATH, size)
         bbox = draw.multiline_textbbox((0, 0), text, font=font, spacing=10, align="center")
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
-        if w <= max_width_px and h <= max_height_px:
+        if w <= max_w and h <= max_h:
             return font
         size -= 2
-    return ImageFont.truetype(font_path, min_size)
+    return ImageFont.truetype(FONT_PATH, min_size)
 
 
-# 1) Voice
-tts = gTTS(SCRIPT)
-tts.save("voice.mp3")
-audio = AudioFileClip("voice.mp3")
-duration = audio.duration  # ✅ match video length to voice
+def make_caption_png(full_text, highlight_sentence=None):
+    """
+    Renders full_text in white.
+    If highlight_sentence is provided, that sentence is drawn again in yellow on top.
+    """
+    img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
 
-# 2) Background video (real)
-bg_path = download_bg_video()
+    # Dark overlay behind captions for readability
+    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    ov_draw = ImageDraw.Draw(overlay)
+    ov_draw.rectangle([0, 0, WIDTH, HEIGHT], fill=(0, 0, 0, 0))
+    img = Image.alpha_composite(img, overlay)
+    draw = ImageDraw.Draw(img)
 
-if bg_path and os.path.exists(bg_path):
-    bg = VideoFileClip(bg_path).subclip(0, min(duration, VideoFileClip(bg_path).duration))
-    bg = bg.resize(height=HEIGHT)
-    # center-crop to width
-    if bg.w > WIDTH:
-        x1 = (bg.w - WIDTH) // 2
-        bg = bg.crop(x1=x1, y1=0, x2=x1 + WIDTH, y2=HEIGHT)
-    else:
-        bg = bg.resize((WIDTH, HEIGHT))
-    bg = bg.set_duration(duration)
-else:
-    # fallback solid background
-    bg = ColorClip(size=(WIDTH, HEIGHT), color=(10, 10, 10), duration=duration)
+    # Caption box height (exclude brand bar)
+    caption_box_h = HEIGHT - TOP_MARGIN - BRAND_BAR_H - 120
 
-# 3) Build readable captions image (no cut-off)
-wrapped = textwrap.fill(SCRIPT, width=MAX_TEXT_WIDTH_CHARS)
+    wrapped = textwrap.fill(full_text, width=34)
 
-img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-draw = ImageDraw.Draw(img)
+    font = fit_font(draw, wrapped, CAPTION_BOX_W, caption_box_h, start=68, min_size=34)
 
-# Caption area excludes branding bar
-caption_box_w = WIDTH - 2 * SIDE_MARGIN
-caption_box_h = HEIGHT - TOP_MARGIN - BRAND_BAR_H - 120
+    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10, align="center")
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    x = (WIDTH - tw) // 2
+    y = TOP_MARGIN + (caption_box_h - th) // 2
 
-font = fit_text(
-    draw,
-    wrapped,
-    FONT_PATH,
-    max_width_px=caption_box_w,
-    max_height_px=caption_box_h,
-    start_size=72,
-    min_size=34
-)
+    # shadow
+    draw.multiline_text((x+3, y+3), wrapped, font=font, fill=(0, 0, 0, 180), spacing=10, align="center")
+    # main white
+    draw.multiline_text((x, y), wrapped, font=font, fill=WHITE, spacing=10, align="center")
 
-# Add a subtle shadow + stroke effect for readability
-bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10, align="center")
-text_w = bbox[2] - bbox[0]
-text_h = bbox[3] - bbox[1]
+    # Highlight sentence (overlay in yellow)
+    if highlight_sentence:
+        # Make a wrapped version of highlight_sentence so it aligns
+        hs = highlight_sentence.strip()
+        # find where it appears in the full wrapped text
+        # (Simple approach: draw yellow sentence centered as its own block—works well visually)
+        hs_wrapped = textwrap.fill(hs, width=34)
+        hs_bbox = draw.multiline_textbbox((0, 0), hs_wrapped, font=font, spacing=10, align="center")
+        hsw = hs_bbox[2] - hs_bbox[0]
+        hsh = hs_bbox[3] - hs_bbox[1]
+        hx = (WIDTH - hsw) // 2
+        # Put highlight near middle (same area); not perfect word-level but reads like “active line”
+        hy = y
+        draw.multiline_text((hx, hy), hs_wrapped, font=font, fill=YELLOW, spacing=10, align="center")
 
-x = (WIDTH - text_w) // 2
-y = TOP_MARGIN + (caption_box_h - text_h) // 2
+    out = "captions.png"
+    img.save(out)
+    return out
 
-# Shadow
-draw.multiline_text((x+3, y+3), wrapped, font=font, fill=(0, 0, 0, 180), spacing=10, align="center")
-# Main text
-draw.multiline_text((x, y), wrapped, font=font, fill=(255, 255, 255, 255), spacing=10, align="center")
 
-img.save("captions.png")
-captions_clip = ImageClip("captions.png").set_duration(duration)
+def make_brand_png():
+    """
+    Two-line branding so it never cuts off.
+    """
+    w, h = WIDTH, BRAND_BAR_H
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
 
-# 4) Branding bar with color
-bar = ColorClip(size=(WIDTH, BRAND_BAR_H), color=(20, 120, 255), duration=duration)  # blue bar
-bar = bar.set_position((0, HEIGHT - BRAND_BAR_H))
+    # Blue bar
+    draw.rectangle([0, 0, w, h], fill=(20, 120, 255, 255))
 
-# Branding text on top of bar
-brand_img = Image.new("RGBA", (WIDTH, BRAND_BAR_H), (0, 0, 0, 0))
-brand_draw = ImageDraw.Draw(brand_img)
-brand_font = ImageFont.truetype(FONT_PATH, 34)
+    font = ImageFont.truetype(FONT_PATH, 34)
 
-bt_bbox = brand_draw.textbbox((0, 0), BRAND_TEXT, font=brand_font)
-bt_w = bt_bbox[2] - bt_bbox[0]
-bt_h = bt_bbox[3] - bt_bbox[1]
-bt_x = (WIDTH - bt_w) // 2
-bt_y = (BRAND_BAR_H - bt_h) // 2
-
-# slight shadow
-brand_draw.text((bt_x+2, bt_y+2), BRAND_TEXT, font=brand_font, fill=(0, 0, 0, 140))
-brand_draw.text((bt_x, bt_y), BRAND_TEXT, font=brand_font, fill=(255, 255, 255, 255))
-
-brand_img.save("brand.png")
-brand_text_clip = ImageClip("brand.png").set_duration(duration).set_position((0, HEIGHT - BRAND_BAR_H))
-
-# 5) Composite + audio
-final = CompositeVideoClip([bg, captions_clip, bar, brand_text_clip]).set_audio(audio)
-
-final.write_videofile(
-    OUTPUT_VIDEO,
-    fps=30,
-    codec="libx264",
-    audio_codec="aac"
-)
-
-print("✅ Video generated:", OUTPUT_VIDEO, "duration:", duration)
+    # line 1
+    b1 = BRAND_TEXT_1
+    b1_bbox = draw.textbbox((0, 0), b1, font=font)
+    b1_w_
