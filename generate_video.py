@@ -43,7 +43,7 @@ def ensure_file(path: str):
     return os.path.exists(path) and os.path.getsize(path) > 10000
 
 
-# ✅ SAFE RGBA COMPOSITE (prevents Pillow mask assertion in CI)
+# ✅ SAFE RGBA COMPOSITE (prevents Pillow paste/mask issues)
 def paste_rgba_safe(base, overlay, pos):
     base = base.convert("RGBA")
     overlay = overlay.convert("RGBA")
@@ -81,18 +81,17 @@ def clean_words(text):
 
 WORDS = clean_words(SCRIPT)
 
-# estimate pacing
 audio_dur = max(1.0, min(voice.duration, TARGET_SECONDS))
 wps = max(1.9, len(WORDS) / audio_dur)
 
 word_times = []
-t = 0.0
+tcur = 0.0
 for w in WORDS:
     base = 1.0 / wps
     bonus = min(0.08, max(0.0, (len(w) - 6) * 0.01))
     dt = base + bonus
-    word_times.append((t, min(t + dt, TARGET_SECONDS), w))
-    t += dt
+    word_times.append((tcur, min(tcur + dt, TARGET_SECONDS), w))
+    tcur += dt
 word_times = [(s, e, w) for (s, e, w) in word_times if s < TARGET_SECONDS]
 
 # ---------- 3) BACKGROUND VISUALS (RGB ONLY) ----------
@@ -127,7 +126,6 @@ def make_bg_frame(t):
     img = Image.fromarray(frame).convert("RGB")
     draw = ImageDraw.Draw(img, "RGBA")
 
-    # particles
     for p in particles:
         px = int((p["x"] + math.sin(t * p["spd"] + p["phase"]) * 0.02) * w)
         py = int((p["y"] + math.cos(t * p["spd"] + p["phase"]) * 0.03) * h)
@@ -139,7 +137,7 @@ def make_bg_frame(t):
 
 bg = VideoClip(make_bg_frame, duration=TARGET_SECONDS).set_fps(FPS)
 
-# ---------- 4) CAPTIONS (RGBA + MASK) ----------
+# ---------- 4) CAPTIONS (NO set_mask; return RGBA directly) ----------
 FONT_MAIN = ImageFont.truetype(FONT_PATH, 70)
 FONT_HOOK = ImageFont.truetype(FONT_PATH, 78)
 
@@ -153,7 +151,7 @@ PUNCH_WORDS = set(["danger", "stressed", "stress", "anxiety", "trick", "dont", "
 GO_WORDS = set(["follow", "start", "return", "build", "tiny", "two", "minutes"])
 
 SAFE_X = 80
-TEXT_TOP = int(HEIGHT * 0.30)   # middle lower
+TEXT_TOP = int(HEIGHT * 0.30)
 MAX_W = WIDTH - SAFE_X * 2
 
 def pick_color(word, is_active):
@@ -181,7 +179,6 @@ def wrap_words(draw, words, font):
         lines.append(current)
     return lines
 
-# Build "pages" (1–2 lines at a time)
 PAGE_TARGET_SEC = 2.2
 pages = []
 i = 0
@@ -196,15 +193,13 @@ while i < len(word_times):
     pages.append((i, j, page_start, word_times[j-1][1], words_slice))
     i = j
 
-def render_caption_frame(t):
-    # active word
+def caption_rgba_frame(t):
     active_idx = None
     for k, (s, e, _) in enumerate(word_times):
         if s <= t < e:
             active_idx = k
             break
 
-    # current page
     page = None
     for (a, b, ps, pe, ws) in pages:
         if active_idx is not None and a <= active_idx < b:
@@ -217,21 +212,16 @@ def render_caption_frame(t):
         page = pages[-1]
 
     a, b, ps, pe, ws = page
-
-    # font
     font = FONT_HOOK if t < 2.6 else FONT_MAIN
 
-    # RGBA canvas
     img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # dark panel behind text
     panel_h = 340
     panel_y = TEXT_TOP - 40
     panel = Image.new("RGBA", (WIDTH, panel_h), (0, 0, 0, 120))
-    img.alpha_composite(panel, (0, panel_y))
+    img = paste_rgba_safe(img, panel, (0, panel_y))
 
-    # wrap into 1–2 lines
     lines = wrap_words(draw, ws, font)
     if len(lines) > 2:
         lines = [lines[0], lines[1]]
@@ -239,8 +229,7 @@ def render_caption_frame(t):
     line_h = font.size + 18
     y0 = TEXT_TOP + (30 if t < 2.6 else 0)
 
-    # Draw each line with per-word highlight
-    local_map = ws[:]  # local list
+    local_map = ws[:]
 
     for li, line_words in enumerate(lines):
         line_text = " ".join(line_words)
@@ -250,8 +239,6 @@ def render_caption_frame(t):
 
         cursor = x
         for idx_local, w in enumerate(line_words):
-            # map to global index by matching in local_map carefully
-            # (handles duplicates better by consuming left->right)
             try:
                 local_pos = local_map.index(w)
             except ValueError:
@@ -261,32 +248,29 @@ def render_caption_frame(t):
             is_active = (active_idx == global_index)
             col = pick_color(w, is_active)
 
-            # shadow + text
             draw.text((cursor + 3, y + 3), w, font=font, fill=COL_SHADOW)
             draw.text((cursor, y), w, font=font, fill=col)
 
             cursor += draw.textlength(w + " ", font=font)
 
-            # consume this word so next duplicate finds the next one
             if local_pos < len(local_map):
                 local_map[local_pos] = "\0"
 
-    return np.array(img.convert("RGBA"))  # MUST be RGBA (H,W,4)
+    # return RGBA numpy array
+    return np.array(img)
 
-def render_caption_rgba(t):
-    frame = render_caption_frame(t)
-    # if something goes wrong and returns RGB, add alpha
-    if frame.shape[2] == 3:
-        alpha = np.full((frame.shape[0], frame.shape[1], 1), 255, dtype=np.uint8)
-        frame = np.concatenate([frame, alpha], axis=2)
-    return frame
+# IMPORTANT: MoviePy needs mask separately; we avoid set_mask by returning RGB clip + proper mask clip.
+def caption_rgb(t):
+    rgba = caption_rgba_frame(t)
+    return rgba[:, :, :3]
 
-captions_rgba = VideoClip(render_caption_rgba, duration=TARGET_SECONDS).set_fps(FPS)
-captions_mask = VideoClip(
-    lambda t: (render_caption_rgba(t)[:, :, 3].astype(np.float32) / 255.0),
-    duration=TARGET_SECONDS
-).set_fps(FPS)
-captions_clip = captions_rgba.set_mask(captions_mask)
+def caption_mask(t):
+    rgba = caption_rgba_frame(t)
+    return (rgba[:, :, 3] / 255.0).astype(np.float32)
+
+captions_rgb = VideoClip(caption_rgb, duration=TARGET_SECONDS).set_fps(FPS)
+captions_m = VideoClip(caption_mask, duration=TARGET_SECONDS, ismask=True).set_fps(FPS)
+captions_clip = captions_rgb.set_mask(captions_m)
 
 # ---------- 5) BRAND BAR (auto-fit, no cut-off) ----------
 def make_brand_overlay():
@@ -295,8 +279,6 @@ def make_brand_overlay():
 
     bar_h = 120
     bar = Image.new("RGBA", (WIDTH, bar_h), (10, 90, 200, 235))
-
-    # ✅ FIX: use safe alpha compositing instead of img.paste()
     img = paste_rgba_safe(img, bar, (0, HEIGHT - bar_h))
 
     size = 34
