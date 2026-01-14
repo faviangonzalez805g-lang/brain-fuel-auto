@@ -141,7 +141,8 @@ def make_bg_frame(t):
         # glow
         draw.ellipse((px-rr*3, py-rr*3, px+rr*3, py+rr*3), fill=(255, 255, 255, 18))
         draw.ellipse((px-rr, py-rr, px+rr, py+rr), fill=(255, 255, 255, 55))
-    return np.array(img)
+    return np.array(img.convert("RGB"))
+
 
 bg = VideoClip(make_bg_frame, duration=TARGET_SECONDS).set_fps(FPS)
 
@@ -281,9 +282,13 @@ def render_caption_frame(t):
     panel = Image.new("RGBA", (WIDTH, int(panel_y2 - panel_y1)), (0, 0, 0, 90))
     img.alpha_composite(panel, (0, int(panel_y1)))
 
-    return np.array(img)
+    return np.array(img.convert("RGB"))
 
-captions_clip = VideoClip(render_caption_frame, duration=TARGET_SECONDS).set_fps(FPS)
+
+captions_clip = VideoClip(render_caption_frame, duration=TARGET_SECONDS).set_fps(FPS).set_mask(
+    VideoClip(lambda t: (render_caption_frame(t)[:, :, 3] / 255.0), duration=TARGET_SECONDS).set_fps(FPS)
+)
+
 
 # ---------- 5) BRAND BAR ----------
 def make_brand_overlay():
