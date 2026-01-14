@@ -3,7 +3,7 @@ name: Brain Fuel YouTube Auto Upload
 on:
   workflow_dispatch:
   schedule:
-    # Runs daily at 14:00 UTC (adjust later)
+    # Daily at 14:00 UTC (change later)
     - cron: "0 14 * * *"
 
 jobs:
@@ -39,7 +39,7 @@ jobs:
           ls -lah
           if [ -f brain_fuel_final.mp4 ]; then
             ls -lah brain_fuel_final.mp4
-            ffprobe -hide_banner -loglevel error -show_format -show_streams brain_fuel_final.mp4 | head -n 120
+            ffprobe -hide_banner -loglevel error -show_format -show_streams brain_fuel_final.mp4 | head -n 160
           else
             echo "❌ brain_fuel_final.mp4 not found"
             exit 1
