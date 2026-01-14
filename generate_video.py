@@ -2,9 +2,7 @@ import os, math, random, re
 import numpy as np
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import (
-    CompositeVideoClip, AudioFileClip, ImageClip, VideoClip
-)
+from moviepy.editor import CompositeVideoClip, AudioFileClip, ImageClip, VideoClip
 
 # ===================== SETTINGS =====================
 WIDTH, HEIGHT = 1080, 1920
@@ -43,14 +41,12 @@ def ensure_file(path: str):
     return os.path.exists(path) and os.path.getsize(path) > 10000
 
 
-# ✅ SAFE RGBA COMPOSITE (prevents Pillow paste/mask issues)
+# ✅ SAFE RGBA COMPOSITE (no Pillow paste mask issues)
 def paste_rgba_safe(base, overlay, pos):
     base = base.convert("RGBA")
     overlay = overlay.convert("RGBA")
-
     tmp = Image.new("RGBA", base.size, (0, 0, 0, 0))
     tmp.paste(overlay, pos)
-
     return Image.alpha_composite(base, tmp)
 
 
@@ -74,7 +70,7 @@ if not ensure_file("voice_loop.mp3"):
 
 voice = AudioFileClip("voice_loop.mp3").set_duration(TARGET_SECONDS)
 
-# ---------- 2) WORD TIMING (simple but looks TikTok-good) ----------
+# ---------- 2) WORD TIMING ----------
 def clean_words(text):
     text = re.sub(r"[^a-zA-Z0-9'’\s]", "", text)
     return [w for w in text.split() if w.strip()]
@@ -94,16 +90,16 @@ for w in WORDS:
     tcur += dt
 word_times = [(s, e, w) for (s, e, w) in word_times if s < TARGET_SECONDS]
 
-# ---------- 3) BACKGROUND VISUALS (RGB ONLY) ----------
+# ---------- 3) BACKGROUND (more neon/motion) ----------
 random.seed(7)
-NUM_PARTICLES = 70
+NUM_PARTICLES = 85
 particles = []
 for _ in range(NUM_PARTICLES):
     particles.append({
         "x": random.random(),
         "y": random.random(),
-        "r": random.randint(3, 8),
-        "spd": 0.02 + random.random() * 0.06,
+        "r": random.randint(3, 9),
+        "spd": 0.02 + random.random() * 0.08,
         "phase": random.random() * 10.0
     })
 
@@ -114,30 +110,33 @@ def make_bg_frame(t):
     Y = np.repeat(yy, w, axis=1)
     X = np.repeat(xx, h, axis=0)
 
-    base = 10 + 25 * (1 - Y)
-    wave1 = 70 * (np.sin(2 * math.pi * (X * 1.1 + t * 0.05)) * 0.5 + 0.5)
-    wave2 = 60 * (np.sin(2 * math.pi * (Y * 1.4 - t * 0.06)) * 0.5 + 0.5)
+    # stronger neon waves
+    base = 8 + 18 * (1 - Y)
+    wave1 = 110 * (np.sin(2 * math.pi * (X * 1.2 + t * 0.09)) * 0.5 + 0.5)
+    wave2 = 95  * (np.sin(2 * math.pi * (Y * 1.6 - t * 0.07)) * 0.5 + 0.5)
+    wave3 = 60  * (np.sin(2 * math.pi * ((X+Y) * 0.9 + t * 0.06)) * 0.5 + 0.5)
 
-    r = base + 0.22 * wave2
-    g = base + 0.45 * wave1
-    b = base + 1.05 * wave1 + 0.55 * wave2
+    r = base + 0.15 * wave2 + 0.35 * wave3
+    g = base + 0.55 * wave1 + 0.10 * wave3
+    b = base + 0.95 * wave1 + 0.55 * wave2
 
     frame = np.clip(np.dstack([r, g, b]), 0, 255).astype(np.uint8)
     img = Image.fromarray(frame).convert("RGB")
     draw = ImageDraw.Draw(img, "RGBA")
 
+    # particles/glow
     for p in particles:
-        px = int((p["x"] + math.sin(t * p["spd"] + p["phase"]) * 0.02) * w)
+        px = int((p["x"] + math.sin(t * p["spd"] + p["phase"]) * 0.03) * w)
         py = int((p["y"] + math.cos(t * p["spd"] + p["phase"]) * 0.03) * h)
         rr = p["r"]
-        draw.ellipse((px-rr*3, py-rr*3, px+rr*3, py+rr*3), fill=(255, 255, 255, 18))
-        draw.ellipse((px-rr, py-rr, px+rr, py+rr), fill=(255, 255, 255, 55))
+        draw.ellipse((px-rr*4, py-rr*4, px+rr*4, py+rr*4), fill=(255, 255, 255, 16))
+        draw.ellipse((px-rr, py-rr, px+rr, py+rr), fill=(255, 255, 255, 65))
 
-    return np.array(img)  # RGB (H,W,3)
+    return np.array(img)
 
 bg = VideoClip(make_bg_frame, duration=TARGET_SECONDS).set_fps(FPS)
 
-# ---------- 4) CAPTIONS (NO set_mask; return RGBA directly) ----------
+# ---------- 4) CAPTIONS (restored) ----------
 FONT_MAIN = ImageFont.truetype(FONT_PATH, 70)
 FONT_HOOK = ImageFont.truetype(FONT_PATH, 78)
 
@@ -217,6 +216,7 @@ def caption_rgba_frame(t):
     img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
+    # dark panel
     panel_h = 340
     panel_y = TEXT_TOP - 40
     panel = Image.new("RGBA", (WIDTH, panel_h), (0, 0, 0, 120))
@@ -256,10 +256,8 @@ def caption_rgba_frame(t):
             if local_pos < len(local_map):
                 local_map[local_pos] = "\0"
 
-    # return RGBA numpy array
     return np.array(img)
 
-# IMPORTANT: MoviePy needs mask separately; we avoid set_mask by returning RGB clip + proper mask clip.
 def caption_rgb(t):
     rgba = caption_rgba_frame(t)
     return rgba[:, :, :3]
@@ -272,15 +270,17 @@ captions_rgb = VideoClip(caption_rgb, duration=TARGET_SECONDS).set_fps(FPS)
 captions_m = VideoClip(caption_mask, duration=TARGET_SECONDS, ismask=True).set_fps(FPS)
 captions_clip = captions_rgb.set_mask(captions_m)
 
-# ---------- 5) BRAND BAR (auto-fit, no cut-off) ----------
+# ---------- 5) BRAND BAR (restored) ----------
 def make_brand_overlay():
     img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
     bar_h = 120
-    bar = Image.new("RGBA", (WIDTH, bar_h), (10, 90, 200, 235))
+    # darker bar so text pops
+    bar = Image.new("RGBA", (WIDTH, bar_h), (0, 0, 0, 180))
     img = paste_rgba_safe(img, bar, (0, HEIGHT - bar_h))
 
+    # auto-fit text
     size = 34
     while True:
         f = ImageFont.truetype(FONT_PATH, size)
@@ -294,8 +294,9 @@ def make_brand_overlay():
     bx = int((WIDTH - bw) // 2)
     by = HEIGHT - bar_h + 38
 
-    draw.text((bx + 2, by + 2), BRAND_TEXT, font=f, fill=(0, 0, 0, 140))
+    draw.text((bx + 2, by + 2), BRAND_TEXT, font=f, fill=(0, 0, 0, 160))
     draw.text((bx, by), BRAND_TEXT, font=f, fill=(255, 255, 255, 255))
+
     img.save("brand.png")
 
 make_brand_overlay()
