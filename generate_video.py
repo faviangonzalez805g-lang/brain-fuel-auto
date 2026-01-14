@@ -145,4 +145,176 @@ def build_loop_background():
 bg = build_loop_background()
 
 # ---------- 4) CAPTIONS ----------
-FONT_MAIN = ImageFont.truetype(FONT_PATH, 70
+FONT_MAIN = ImageFont.truetype(FONT_PATH, 70)
+FONT_HOOK = ImageFont.truetype(FONT_PATH, 78)
+
+COL_NORMAL = (255, 255, 255, 235)
+COL_HILITE = (255, 220, 0, 255)
+COL_PUNCH  = (255, 70, 70, 255)
+COL_GO     = (80, 255, 120, 255)
+COL_SHADOW = (0, 0, 0, 190)
+
+PUNCH_WORDS = set(["danger", "stressed", "stress", "anxiety", "trick", "dont", "don't", "restart"])
+GO_WORDS = set(["follow", "start", "return", "build", "tiny", "two", "minutes"])
+
+SAFE_X = 80
+TEXT_TOP = int(HEIGHT * 0.30)
+MAX_W = WIDTH - SAFE_X * 2
+
+def pick_color(word, is_active):
+    w = word.lower().replace("’", "'")
+    if not is_active:
+        return COL_NORMAL
+    if w in PUNCH_WORDS:
+        return COL_PUNCH
+    if w in GO_WORDS:
+        return COL_GO
+    return COL_HILITE
+
+def wrap_words(draw, words, font):
+    lines = []
+    current = []
+    for w in words:
+        test = " ".join(current + [w])
+        if draw.textlength(test, font=font) <= MAX_W:
+            current.append(w)
+        else:
+            if current:
+                lines.append(current)
+            current = [w]
+    if current:
+        lines.append(current)
+    return lines
+
+PAGE_TARGET_SEC = 2.2
+pages = []
+i = 0
+while i < len(word_times):
+    page_start = word_times[i][0]
+    j = i
+    while j < len(word_times) and (word_times[j][1] - page_start) < PAGE_TARGET_SEC:
+        j += 1
+    if j == i:
+        j += 1
+    words_slice = [wt[2] for wt in word_times[i:j]]
+    pages.append((i, j, page_start, word_times[j-1][1], words_slice))
+    i = j
+
+def caption_rgba_frame(t):
+    active_idx = None
+    for k, (s, e, _) in enumerate(word_times):
+        if s <= t < e:
+            active_idx = k
+            break
+
+    page = None
+    for (a, b, ps, pe, ws) in pages:
+        if active_idx is not None and a <= active_idx < b:
+            page = (a, b, ps, pe, ws)
+            break
+        if active_idx is None and ps <= t < pe:
+            page = (a, b, ps, pe, ws)
+            break
+    if page is None:
+        page = pages[-1]
+
+    a, b, ps, pe, ws = page
+    font = FONT_HOOK if t < 2.6 else FONT_MAIN
+
+    img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # semi-dark panel for readability
+    panel_h = 340
+    panel_y = TEXT_TOP - 40
+    panel = Image.new("RGBA", (WIDTH, panel_h), (0, 0, 0, 120))
+    img = paste_rgba_safe(img, panel, (0, panel_y))
+
+    lines = wrap_words(draw, ws, font)
+    if len(lines) > 2:
+        lines = [lines[0], lines[1]]
+
+    line_h = font.size + 18
+    y0 = TEXT_TOP + (30 if t < 2.6 else 0)
+
+    local_map = ws[:]
+    for li, line_words in enumerate(lines):
+        line_text = " ".join(line_words)
+        line_w = draw.textlength(line_text, font=font)
+        x = int((WIDTH - line_w) // 2)
+        y = y0 + li * line_h
+
+        cursor = x
+        for idx_local, w in enumerate(line_words):
+            try:
+                local_pos = local_map.index(w)
+            except ValueError:
+                local_pos = idx_local
+
+            global_index = a + local_pos
+            is_active = (active_idx == global_index)
+            col = pick_color(w, is_active)
+
+            draw.text((cursor + 3, y + 3), w, font=font, fill=COL_SHADOW)
+            draw.text((cursor, y), w, font=font, fill=col)
+
+            cursor += draw.textlength(w + " ", font=font)
+            if local_pos < len(local_map):
+                local_map[local_pos] = "\0"
+
+    return np.array(img)
+
+def caption_rgb(t):
+    rgba = caption_rgba_frame(t)
+    return rgba[:, :, :3]
+
+def caption_mask(t):
+    rgba = caption_rgba_frame(t)
+    return (rgba[:, :, 3] / 255.0).astype(np.float32)
+
+captions_rgb = VideoClip(caption_rgb, duration=TARGET_SECONDS).set_fps(FPS)
+captions_m = VideoClip(caption_mask, duration=TARGET_SECONDS, ismask=True).set_fps(FPS)
+captions_clip = captions_rgb.set_mask(captions_m)
+
+# ---------- 5) BRAND BAR ----------
+def make_brand_overlay():
+    img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    bar_h = 120
+    bar = Image.new("RGBA", (WIDTH, bar_h), (0, 0, 0, 180))
+    img = paste_rgba_safe(img, bar, (0, HEIGHT - bar_h))
+
+    size = 34
+    while True:
+        f = ImageFont.truetype(FONT_PATH, size)
+        bw = draw.textlength(BRAND_TEXT, font=f)
+        if bw <= WIDTH - 60 or size <= 22:
+            break
+        size -= 1
+
+    f = ImageFont.truetype(FONT_PATH, size)
+    bw = draw.textlength(BRAND_TEXT, font=f)
+    bx = int((WIDTH - bw) // 2)
+    by = HEIGHT - bar_h + 38
+
+    draw.text((bx + 2, by + 2), BRAND_TEXT, font=f, fill=(0, 0, 0, 160))
+    draw.text((bx, by), BRAND_TEXT, font=f, fill=(255, 255, 255, 255))
+    img.save("brand.png")
+
+make_brand_overlay()
+brand = ImageClip("brand.png").set_duration(TARGET_SECONDS)
+
+# ---------- 6) COMPOSE + EXPORT ----------
+final = CompositeVideoClip([bg, captions_clip, brand], size=(WIDTH, HEIGHT)).set_audio(voice)
+
+final.write_videofile(
+    OUTFILE,
+    fps=FPS,
+    codec="libx264",
+    audio_codec="aac",
+    audio_fps=44100,
+    ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+)
+
+print("✅ Video created:", OUTFILE)
