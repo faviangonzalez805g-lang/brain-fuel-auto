@@ -2,16 +2,13 @@ import os, math, random, re, glob
 import numpy as np
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import (
-    CompositeVideoClip, AudioFileClip, ImageClip, VideoClip,
-    VideoFileClip, concatenate_videoclips
-)
+from moviepy.editor import AudioFileClip, VideoFileClip, ImageSequenceClip, concatenate_videoclips
 
 # ===================== SETTINGS =====================
 WIDTH, HEIGHT = 1080, 1920
 FPS = 30
 TARGET_SECONDS = 62
-VOICE_SPEED = 1.18  # faster voice
+VOICE_SPEED = 1.18
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
@@ -34,11 +31,10 @@ SCRIPT = f"{HOOK} {MAIN} {CTA}"
 BRAND_TEXT = "YouTube: Brain Fuel Media   |   IG/TikTok: @Brain.FuelMedia"
 OUTFILE = "brain_fuel_final.mp4"
 
-# ==== ElevenLabs controls (safe testing) ====
-# Keep True while testing visuals so you don't burn credits.
+# ✅ Keep free while testing
 DRY_RUN_ELEVENLABS = True
 ELEVEN_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVEN_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
+ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "")  # optional later
 # ===================================================
 
 
@@ -60,13 +56,10 @@ def paste_rgba_safe(base, overlay, pos):
 
 # ---------- 1) AUDIO ----------
 def make_voice_mp3():
-    # A) Free mode while testing
     if DRY_RUN_ELEVENLABS or not ELEVEN_API_KEY or not ELEVEN_VOICE_ID:
         gTTS(SCRIPT, slow=False).save("voice_raw.mp3")
         return
 
-    # B) ElevenLabs mode (only after you flip DRY_RUN_ELEVENLABS=False)
-    # Uses curl to avoid extra pip dependencies.
     safe_text = SCRIPT.replace("\\", "\\\\").replace('"', '\\"')
     cmd = (
         f'curl -s -X POST "https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}" '
@@ -78,18 +71,16 @@ def make_voice_mp3():
     )
     sh(cmd)
     if not ensure_file("voice_raw.mp3"):
-        raise SystemExit("❌ ElevenLabs failed to generate voice_raw.mp3 (check API key/voice id).")
+        raise SystemExit("❌ ElevenLabs failed to generate voice_raw.mp3 (check key/voice id).")
 
 make_voice_mp3()
 
-# speed + loudness normalize
 sh(
     f'ffmpeg -y -i voice_raw.mp3 '
     f'-filter:a "atempo={VOICE_SPEED},loudnorm=I=-16:TP=-1.5:LRA=11" '
     f'voice_fast.mp3'
 )
 
-# loop voice to full length
 sh(f'ffmpeg -y -stream_loop -1 -i voice_fast.mp3 -t {TARGET_SECONDS} -c copy voice_loop.mp3')
 if not ensure_file("voice_loop.mp3"):
     sh(
@@ -118,33 +109,29 @@ for w in WORDS:
     tcur += dt
 word_times = [(s, e, w) for (s, e, w) in word_times if s < TARGET_SECONDS]
 
-# ---------- 3) BACKGROUND (BEST: motion loops; fallback: neon generator) ----------
+# ---------- 3) BACKGROUND: motion loops (best) + neon fallback ----------
 def build_loop_background():
     loop_paths = sorted(glob.glob("assets/loops/*.mp4"))
     if not loop_paths:
-        return None  # trigger fallback
+        return None
 
     clips = []
     for p in loop_paths:
-        c = VideoFileClip(p, audio=False)
-        c = c.resize((WIDTH, HEIGHT)).set_fps(FPS)
+        c = VideoFileClip(p, audio=False).resize((WIDTH, HEIGHT)).set_fps(FPS)
         clips.append(c)
 
     random.shuffle(clips)
 
-    built = []
-    total = 0.0
-    idx = 0
+    built, total, idx = [], 0.0, 0
     while total < TARGET_SECONDS:
         c = clips[idx % len(clips)]
         built.append(c)
         total += c.duration
         idx += 1
 
-    bg = concatenate_videoclips(built, method="compose")
-    return bg.subclip(0, TARGET_SECONDS)
+    bg = concatenate_videoclips(built, method="compose").subclip(0, TARGET_SECONDS)
+    return bg
 
-# fallback neon background (never fails)
 random.seed(7)
 NUM_PARTICLES = 85
 particles = []
@@ -186,12 +173,13 @@ def make_neon_bg_frame(t):
 
     return np.array(img)
 
-bg = build_loop_background()
-if bg is None:
+bg_clip = build_loop_background()
+USE_LOOPS = bg_clip is not None
+if not USE_LOOPS:
     print("⚠️ No motion loops found in assets/loops/. Using neon fallback background.")
-    bg = VideoClip(make_neon_bg_frame, duration=TARGET_SECONDS).set_fps(FPS)
+# NOTE: We'll sample background per frame below (loops or fallback)
 
-# ---------- 4) CAPTIONS ----------
+# ---------- 4) CAPTIONS + BRAND (BURNED IN, NO MOVIEPY MASKS) ----------
 FONT_MAIN = ImageFont.truetype(FONT_PATH, 70)
 FONT_HOOK = ImageFont.truetype(FONT_PATH, 78)
 
@@ -246,13 +234,15 @@ while i < len(word_times):
     pages.append((i, j, page_start, word_times[j-1][1], words_slice))
     i = j
 
-def caption_rgba_frame(t):
+def render_captions_rgba(t):
+    # active word
     active_idx = None
     for k, (s, e, _) in enumerate(word_times):
         if s <= t < e:
             active_idx = k
             break
 
+    # current page
     page = None
     for (a, b, ps, pe, ws) in pages:
         if active_idx is not None and a <= active_idx < b:
@@ -263,18 +253,20 @@ def caption_rgba_frame(t):
             break
     if page is None:
         page = pages[-1]
-
     a, b, ps, pe, ws = page
+
     font = FONT_HOOK if t < 2.6 else FONT_MAIN
 
     img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
+    # dark panel for readability
     panel_h = 340
     panel_y = TEXT_TOP - 40
     panel = Image.new("RGBA", (WIDTH, panel_h), (0, 0, 0, 120))
     img = paste_rgba_safe(img, panel, (0, panel_y))
 
+    # wrap into 1–2 lines
     lines = wrap_words(draw, ws, font)
     if len(lines) > 2:
         lines = [lines[0], lines[1]]
@@ -307,22 +299,9 @@ def caption_rgba_frame(t):
             if local_pos < len(local_map):
                 local_map[local_pos] = "\0"
 
-    return np.array(img)
+    return img
 
-def caption_rgb(t):
-    rgba = caption_rgba_frame(t)
-    return rgba[:, :, :3]
-
-def caption_mask(t):
-    rgba = caption_rgba_frame(t)
-    return (rgba[:, :, 3] / 255.0).astype(np.float32)
-
-captions_rgb = VideoClip(caption_rgb, duration=TARGET_SECONDS).set_fps(FPS)
-captions_m = VideoClip(caption_mask, duration=TARGET_SECONDS, ismask=True).set_fps(FPS)
-captions_clip = captions_rgb.set_mask(captions_m)
-
-# ---------- 5) BRAND BAR ----------
-def make_brand_overlay():
+def render_brand_rgba():
     img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
@@ -345,17 +324,46 @@ def make_brand_overlay():
 
     draw.text((bx + 2, by + 2), BRAND_TEXT, font=f, fill=(0, 0, 0, 160))
     draw.text((bx, by), BRAND_TEXT, font=f, fill=(255, 255, 255, 255))
-    img.save("brand.png")
+    return img
 
-make_brand_overlay()
-brand = ImageClip("brand.png").set_duration(TARGET_SECONDS)
+BRAND_RGBA = render_brand_rgba()
 
-# ---------- 6) COMPOSE + EXPORT ----------
-final = CompositeVideoClip([bg, captions_clip, brand], size=(WIDTH, HEIGHT)).set_audio(voice)
+# ---------- 5) BUILD FRAMES (background + overlay burned in) ----------
+frames = []
+total_frames = int(TARGET_SECONDS * FPS)
 
-final.write_videofile(
+# If using loops, prep background reader
+if USE_LOOPS:
+    bg_clip = bg_clip.set_fps(FPS)
+
+for fi in range(total_frames):
+    t = fi / FPS
+
+    # Background frame
+    if USE_LOOPS:
+        bg_arr = bg_clip.get_frame(t)  # RGB
+        base = Image.fromarray(bg_arr.astype(np.uint8)).convert("RGBA")
+    else:
+        base = Image.fromarray(make_neon_bg_frame(t)).convert("RGBA")
+
+    # Hybrid overlay (subtle neon particles + waves) on top of loops too
+    # (This is your “Hybrid” depth layer)
+    overlay = Image.fromarray(make_neon_bg_frame(t)).convert("RGBA")
+    overlay.putalpha(70)  # intensity of overlay (0-255)
+    base = paste_rgba_safe(base, overlay, (0, 0))
+
+    # Captions + brand burned in
+    caps = render_captions_rgba(t)
+    base = paste_rgba_safe(base, caps, (0, 0))
+    base = paste_rgba_safe(base, BRAND_RGBA, (0, 0))
+
+    frames.append(np.array(base.convert("RGB")))
+
+# ---------- 6) EXPORT ----------
+clip = ImageSequenceClip(frames, fps=FPS).set_audio(voice)
+
+clip.write_videofile(
     OUTFILE,
-    fps=FPS,
     codec="libx264",
     audio_codec="aac",
     audio_fps=44100,
