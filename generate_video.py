@@ -3,7 +3,8 @@ import numpy as np
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import (
-    CompositeVideoClip, AudioFileClip, ImageClip, VideoClip, VideoFileClip, concatenate_videoclips
+    CompositeVideoClip, AudioFileClip, ImageClip, VideoClip,
+    VideoFileClip, concatenate_videoclips
 )
 
 # ===================== SETTINGS =====================
@@ -33,10 +34,11 @@ SCRIPT = f"{HOOK} {MAIN} {CTA}"
 BRAND_TEXT = "YouTube: Brain Fuel Media   |   IG/TikTok: @Brain.FuelMedia"
 OUTFILE = "brain_fuel_final.mp4"
 
-# ==== ElevenLabs controls (SAFE TESTING) ====
-DRY_RUN_ELEVENLABS = True  # ✅ keep True while testing visuals/captions
+# ==== ElevenLabs controls (safe testing) ====
+# Keep True while testing visuals so you don't burn credits.
+DRY_RUN_ELEVENLABS = True
 ELEVEN_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVEN_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")  # set later
+ELEVEN_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 # ===================================================
 
 
@@ -57,15 +59,16 @@ def paste_rgba_safe(base, overlay, pos):
 
 
 # ---------- 1) AUDIO ----------
-# A) Safe testing mode: gTTS (free)
-if DRY_RUN_ELEVENLABS or not ELEVEN_API_KEY or not ELEVEN_VOICE_ID:
-    gTTS(SCRIPT, slow=False).save("voice_raw.mp3")
-else:
-    # B) ElevenLabs mode (only when you flip DRY_RUN_ELEVENLABS=False)
-    # Minimal dependency approach: use curl so no extra pip packages needed
-    # Saves to voice_raw.mp3
-    safe_text = SCRIPT.replace('"', '\\"')
-    sh(
+def make_voice_mp3():
+    # A) Free mode while testing
+    if DRY_RUN_ELEVENLABS or not ELEVEN_API_KEY or not ELEVEN_VOICE_ID:
+        gTTS(SCRIPT, slow=False).save("voice_raw.mp3")
+        return
+
+    # B) ElevenLabs mode (only after you flip DRY_RUN_ELEVENLABS=False)
+    # Uses curl to avoid extra pip dependencies.
+    safe_text = SCRIPT.replace("\\", "\\\\").replace('"', '\\"')
+    cmd = (
         f'curl -s -X POST "https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}" '
         f'-H "xi-api-key: {ELEVEN_API_KEY}" '
         f'-H "Content-Type: application/json" '
@@ -73,6 +76,11 @@ else:
         f'\\"voice_settings\\":{{\\"stability\\":0.4,\\"similarity_boost\\":0.85}}}}" '
         f'--output voice_raw.mp3'
     )
+    sh(cmd)
+    if not ensure_file("voice_raw.mp3"):
+        raise SystemExit("❌ ElevenLabs failed to generate voice_raw.mp3 (check API key/voice id).")
+
+make_voice_mp3()
 
 # speed + loudness normalize
 sh(
@@ -110,25 +118,20 @@ for w in WORDS:
     tcur += dt
 word_times = [(s, e, w) for (s, e, w) in word_times if s < TARGET_SECONDS]
 
-# ---------- 3) BACKGROUND: MOTION LOOPS ----------
+# ---------- 3) BACKGROUND (BEST: motion loops; fallback: neon generator) ----------
 def build_loop_background():
     loop_paths = sorted(glob.glob("assets/loops/*.mp4"))
     if not loop_paths:
-        raise SystemExit(
-            "❌ No motion loops found. Add MP4 files to: assets/loops/"
-        )
+        return None  # trigger fallback
 
-    # Load & prep clips
     clips = []
     for p in loop_paths:
         c = VideoFileClip(p, audio=False)
         c = c.resize((WIDTH, HEIGHT)).set_fps(FPS)
         clips.append(c)
 
-    # Randomize order each run
     random.shuffle(clips)
 
-    # Repeat until we cover duration
     built = []
     total = 0.0
     idx = 0
@@ -139,10 +142,54 @@ def build_loop_background():
         idx += 1
 
     bg = concatenate_videoclips(built, method="compose")
-    bg = bg.subclip(0, TARGET_SECONDS)
-    return bg
+    return bg.subclip(0, TARGET_SECONDS)
+
+# fallback neon background (never fails)
+random.seed(7)
+NUM_PARTICLES = 85
+particles = []
+for _ in range(NUM_PARTICLES):
+    particles.append({
+        "x": random.random(),
+        "y": random.random(),
+        "r": random.randint(3, 9),
+        "spd": 0.02 + random.random() * 0.08,
+        "phase": random.random() * 10.0
+    })
+
+def make_neon_bg_frame(t):
+    h, w = HEIGHT, WIDTH
+    yy = np.linspace(0, 1, h).reshape(h, 1)
+    xx = np.linspace(0, 1, w).reshape(1, w)
+    Y = np.repeat(yy, w, axis=1)
+    X = np.repeat(xx, h, axis=0)
+
+    base = 8 + 18 * (1 - Y)
+    wave1 = 110 * (np.sin(2 * math.pi * (X * 1.2 + t * 0.09)) * 0.5 + 0.5)
+    wave2 = 95  * (np.sin(2 * math.pi * (Y * 1.6 - t * 0.07)) * 0.5 + 0.5)
+    wave3 = 60  * (np.sin(2 * math.pi * ((X + Y) * 0.9 + t * 0.06)) * 0.5 + 0.5)
+
+    r = base + 0.15 * wave2 + 0.35 * wave3
+    g = base + 0.55 * wave1 + 0.10 * wave3
+    b = base + 0.95 * wave1 + 0.55 * wave2
+
+    frame = np.clip(np.dstack([r, g, b]), 0, 255).astype(np.uint8)
+    img = Image.fromarray(frame).convert("RGB")
+    draw = ImageDraw.Draw(img, "RGBA")
+
+    for p in particles:
+        px = int((p["x"] + math.sin(t * p["spd"] + p["phase"]) * 0.03) * w)
+        py = int((p["y"] + math.cos(t * p["spd"] + p["phase"]) * 0.03) * h)
+        rr = p["r"]
+        draw.ellipse((px-rr*4, py-rr*4, px+rr*4, py+rr*4), fill=(255, 255, 255, 16))
+        draw.ellipse((px-rr, py-rr, px+rr, py+rr), fill=(255, 255, 255, 65))
+
+    return np.array(img)
 
 bg = build_loop_background()
+if bg is None:
+    print("⚠️ No motion loops found in assets/loops/. Using neon fallback background.")
+    bg = VideoClip(make_neon_bg_frame, duration=TARGET_SECONDS).set_fps(FPS)
 
 # ---------- 4) CAPTIONS ----------
 FONT_MAIN = ImageFont.truetype(FONT_PATH, 70)
@@ -172,8 +219,7 @@ def pick_color(word, is_active):
     return COL_HILITE
 
 def wrap_words(draw, words, font):
-    lines = []
-    current = []
+    lines, current = [], []
     for w in words:
         test = " ".join(current + [w])
         if draw.textlength(test, font=font) <= MAX_W:
@@ -224,7 +270,6 @@ def caption_rgba_frame(t):
     img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # semi-dark panel for readability
     panel_h = 340
     panel_y = TEXT_TOP - 40
     panel = Image.new("RGBA", (WIDTH, panel_h), (0, 0, 0, 120))
