@@ -1,8 +1,10 @@
-import os, math, random, re
+import os, math, random, re, glob
 import numpy as np
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import CompositeVideoClip, AudioFileClip, ImageClip, VideoClip
+from moviepy.editor import (
+    CompositeVideoClip, AudioFileClip, ImageClip, VideoClip, VideoFileClip, concatenate_videoclips
+)
 
 # ===================== SETTINGS =====================
 WIDTH, HEIGHT = 1080, 1920
@@ -30,6 +32,11 @@ SCRIPT = f"{HOOK} {MAIN} {CTA}"
 
 BRAND_TEXT = "YouTube: Brain Fuel Media   |   IG/TikTok: @Brain.FuelMedia"
 OUTFILE = "brain_fuel_final.mp4"
+
+# ==== ElevenLabs controls (SAFE TESTING) ====
+DRY_RUN_ELEVENLABS = True  # ✅ keep True while testing visuals/captions
+ELEVEN_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVEN_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")  # set later
 # ===================================================
 
 
@@ -41,7 +48,6 @@ def ensure_file(path: str):
     return os.path.exists(path) and os.path.getsize(path) > 10000
 
 
-# ✅ SAFE RGBA COMPOSITE (no Pillow paste mask issues)
 def paste_rgba_safe(base, overlay, pos):
     base = base.convert("RGBA")
     overlay = overlay.convert("RGBA")
@@ -51,7 +57,22 @@ def paste_rgba_safe(base, overlay, pos):
 
 
 # ---------- 1) AUDIO ----------
-gTTS(SCRIPT, slow=False).save("voice_raw.mp3")
+# A) Safe testing mode: gTTS (free)
+if DRY_RUN_ELEVENLABS or not ELEVEN_API_KEY or not ELEVEN_VOICE_ID:
+    gTTS(SCRIPT, slow=False).save("voice_raw.mp3")
+else:
+    # B) ElevenLabs mode (only when you flip DRY_RUN_ELEVENLABS=False)
+    # Minimal dependency approach: use curl so no extra pip packages needed
+    # Saves to voice_raw.mp3
+    safe_text = SCRIPT.replace('"', '\\"')
+    sh(
+        f'curl -s -X POST "https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE_ID}" '
+        f'-H "xi-api-key: {ELEVEN_API_KEY}" '
+        f'-H "Content-Type: application/json" '
+        f'-d "{{\\"text\\":\\"{safe_text}\\",\\"model_id\\":\\"eleven_multilingual_v2\\",'
+        f'\\"voice_settings\\":{{\\"stability\\":0.4,\\"similarity_boost\\":0.85}}}}" '
+        f'--output voice_raw.mp3'
+    )
 
 # speed + loudness normalize
 sh(
@@ -76,7 +97,6 @@ def clean_words(text):
     return [w for w in text.split() if w.strip()]
 
 WORDS = clean_words(SCRIPT)
-
 audio_dur = max(1.0, min(voice.duration, TARGET_SECONDS))
 wps = max(1.9, len(WORDS) / audio_dur)
 
@@ -90,228 +110,39 @@ for w in WORDS:
     tcur += dt
 word_times = [(s, e, w) for (s, e, w) in word_times if s < TARGET_SECONDS]
 
-# ---------- 3) BACKGROUND (more neon/motion) ----------
-random.seed(7)
-NUM_PARTICLES = 85
-particles = []
-for _ in range(NUM_PARTICLES):
-    particles.append({
-        "x": random.random(),
-        "y": random.random(),
-        "r": random.randint(3, 9),
-        "spd": 0.02 + random.random() * 0.08,
-        "phase": random.random() * 10.0
-    })
+# ---------- 3) BACKGROUND: MOTION LOOPS ----------
+def build_loop_background():
+    loop_paths = sorted(glob.glob("assets/loops/*.mp4"))
+    if not loop_paths:
+        raise SystemExit(
+            "❌ No motion loops found. Add MP4 files to: assets/loops/"
+        )
 
-def make_bg_frame(t):
-    h, w = HEIGHT, WIDTH
-    yy = np.linspace(0, 1, h).reshape(h, 1)
-    xx = np.linspace(0, 1, w).reshape(1, w)
-    Y = np.repeat(yy, w, axis=1)
-    X = np.repeat(xx, h, axis=0)
+    # Load & prep clips
+    clips = []
+    for p in loop_paths:
+        c = VideoFileClip(p, audio=False)
+        c = c.resize((WIDTH, HEIGHT)).set_fps(FPS)
+        clips.append(c)
 
-    # stronger neon waves
-    base = 8 + 18 * (1 - Y)
-    wave1 = 110 * (np.sin(2 * math.pi * (X * 1.2 + t * 0.09)) * 0.5 + 0.5)
-    wave2 = 95  * (np.sin(2 * math.pi * (Y * 1.6 - t * 0.07)) * 0.5 + 0.5)
-    wave3 = 60  * (np.sin(2 * math.pi * ((X+Y) * 0.9 + t * 0.06)) * 0.5 + 0.5)
+    # Randomize order each run
+    random.shuffle(clips)
 
-    r = base + 0.15 * wave2 + 0.35 * wave3
-    g = base + 0.55 * wave1 + 0.10 * wave3
-    b = base + 0.95 * wave1 + 0.55 * wave2
+    # Repeat until we cover duration
+    built = []
+    total = 0.0
+    idx = 0
+    while total < TARGET_SECONDS:
+        c = clips[idx % len(clips)]
+        built.append(c)
+        total += c.duration
+        idx += 1
 
-    frame = np.clip(np.dstack([r, g, b]), 0, 255).astype(np.uint8)
-    img = Image.fromarray(frame).convert("RGB")
-    draw = ImageDraw.Draw(img, "RGBA")
+    bg = concatenate_videoclips(built, method="compose")
+    bg = bg.subclip(0, TARGET_SECONDS)
+    return bg
 
-    # particles/glow
-    for p in particles:
-        px = int((p["x"] + math.sin(t * p["spd"] + p["phase"]) * 0.03) * w)
-        py = int((p["y"] + math.cos(t * p["spd"] + p["phase"]) * 0.03) * h)
-        rr = p["r"]
-        draw.ellipse((px-rr*4, py-rr*4, px+rr*4, py+rr*4), fill=(255, 255, 255, 16))
-        draw.ellipse((px-rr, py-rr, px+rr, py+rr), fill=(255, 255, 255, 65))
+bg = build_loop_background()
 
-    return np.array(img)
-
-bg = VideoClip(make_bg_frame, duration=TARGET_SECONDS).set_fps(FPS)
-
-# ---------- 4) CAPTIONS (restored) ----------
-FONT_MAIN = ImageFont.truetype(FONT_PATH, 70)
-FONT_HOOK = ImageFont.truetype(FONT_PATH, 78)
-
-COL_NORMAL = (255, 255, 255, 235)
-COL_HILITE = (255, 220, 0, 255)   # yellow
-COL_PUNCH  = (255, 70, 70, 255)   # red
-COL_GO     = (80, 255, 120, 255)  # green
-COL_SHADOW = (0, 0, 0, 190)
-
-PUNCH_WORDS = set(["danger", "stressed", "stress", "anxiety", "trick", "dont", "don't", "restart"])
-GO_WORDS = set(["follow", "start", "return", "build", "tiny", "two", "minutes"])
-
-SAFE_X = 80
-TEXT_TOP = int(HEIGHT * 0.30)
-MAX_W = WIDTH - SAFE_X * 2
-
-def pick_color(word, is_active):
-    w = word.lower().replace("’", "'")
-    if not is_active:
-        return COL_NORMAL
-    if w in PUNCH_WORDS:
-        return COL_PUNCH
-    if w in GO_WORDS:
-        return COL_GO
-    return COL_HILITE
-
-def wrap_words(draw, words, font):
-    lines = []
-    current = []
-    for w in words:
-        test = " ".join(current + [w])
-        if draw.textlength(test, font=font) <= MAX_W:
-            current.append(w)
-        else:
-            if current:
-                lines.append(current)
-            current = [w]
-    if current:
-        lines.append(current)
-    return lines
-
-PAGE_TARGET_SEC = 2.2
-pages = []
-i = 0
-while i < len(word_times):
-    page_start = word_times[i][0]
-    j = i
-    while j < len(word_times) and (word_times[j][1] - page_start) < PAGE_TARGET_SEC:
-        j += 1
-    if j == i:
-        j += 1
-    words_slice = [wt[2] for wt in word_times[i:j]]
-    pages.append((i, j, page_start, word_times[j-1][1], words_slice))
-    i = j
-
-def caption_rgba_frame(t):
-    active_idx = None
-    for k, (s, e, _) in enumerate(word_times):
-        if s <= t < e:
-            active_idx = k
-            break
-
-    page = None
-    for (a, b, ps, pe, ws) in pages:
-        if active_idx is not None and a <= active_idx < b:
-            page = (a, b, ps, pe, ws)
-            break
-        if active_idx is None and ps <= t < pe:
-            page = (a, b, ps, pe, ws)
-            break
-    if page is None:
-        page = pages[-1]
-
-    a, b, ps, pe, ws = page
-    font = FONT_HOOK if t < 2.6 else FONT_MAIN
-
-    img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    # dark panel
-    panel_h = 340
-    panel_y = TEXT_TOP - 40
-    panel = Image.new("RGBA", (WIDTH, panel_h), (0, 0, 0, 120))
-    img = paste_rgba_safe(img, panel, (0, panel_y))
-
-    lines = wrap_words(draw, ws, font)
-    if len(lines) > 2:
-        lines = [lines[0], lines[1]]
-
-    line_h = font.size + 18
-    y0 = TEXT_TOP + (30 if t < 2.6 else 0)
-
-    local_map = ws[:]
-
-    for li, line_words in enumerate(lines):
-        line_text = " ".join(line_words)
-        line_w = draw.textlength(line_text, font=font)
-        x = int((WIDTH - line_w) // 2)
-        y = y0 + li * line_h
-
-        cursor = x
-        for idx_local, w in enumerate(line_words):
-            try:
-                local_pos = local_map.index(w)
-            except ValueError:
-                local_pos = idx_local
-
-            global_index = a + local_pos
-            is_active = (active_idx == global_index)
-            col = pick_color(w, is_active)
-
-            draw.text((cursor + 3, y + 3), w, font=font, fill=COL_SHADOW)
-            draw.text((cursor, y), w, font=font, fill=col)
-
-            cursor += draw.textlength(w + " ", font=font)
-
-            if local_pos < len(local_map):
-                local_map[local_pos] = "\0"
-
-    return np.array(img)
-
-def caption_rgb(t):
-    rgba = caption_rgba_frame(t)
-    return rgba[:, :, :3]
-
-def caption_mask(t):
-    rgba = caption_rgba_frame(t)
-    return (rgba[:, :, 3] / 255.0).astype(np.float32)
-
-captions_rgb = VideoClip(caption_rgb, duration=TARGET_SECONDS).set_fps(FPS)
-captions_m = VideoClip(caption_mask, duration=TARGET_SECONDS, ismask=True).set_fps(FPS)
-captions_clip = captions_rgb.set_mask(captions_m)
-
-# ---------- 5) BRAND BAR (restored) ----------
-def make_brand_overlay():
-    img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    bar_h = 120
-    # darker bar so text pops
-    bar = Image.new("RGBA", (WIDTH, bar_h), (0, 0, 0, 180))
-    img = paste_rgba_safe(img, bar, (0, HEIGHT - bar_h))
-
-    # auto-fit text
-    size = 34
-    while True:
-        f = ImageFont.truetype(FONT_PATH, size)
-        bw = draw.textlength(BRAND_TEXT, font=f)
-        if bw <= WIDTH - 60 or size <= 22:
-            break
-        size -= 1
-
-    f = ImageFont.truetype(FONT_PATH, size)
-    bw = draw.textlength(BRAND_TEXT, font=f)
-    bx = int((WIDTH - bw) // 2)
-    by = HEIGHT - bar_h + 38
-
-    draw.text((bx + 2, by + 2), BRAND_TEXT, font=f, fill=(0, 0, 0, 160))
-    draw.text((bx, by), BRAND_TEXT, font=f, fill=(255, 255, 255, 255))
-
-    img.save("brand.png")
-
-make_brand_overlay()
-brand = ImageClip("brand.png").set_duration(TARGET_SECONDS)
-
-# ---------- 6) COMPOSE + EXPORT ----------
-final = CompositeVideoClip([bg, captions_clip, brand], size=(WIDTH, HEIGHT)).set_audio(voice)
-
-final.write_videofile(
-    OUTFILE,
-    fps=FPS,
-    codec="libx264",
-    audio_codec="aac",
-    audio_fps=44100,
-    ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"]
-)
-
-print("✅ Video created:", OUTFILE)
+# ---------- 4) CAPTIONS ----------
+FONT_MAIN = ImageFont.truetype(FONT_PATH, 70
