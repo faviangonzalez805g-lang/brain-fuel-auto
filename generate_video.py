@@ -43,6 +43,17 @@ def ensure_file(path: str):
     return os.path.exists(path) and os.path.getsize(path) > 10000
 
 
+# ✅ SAFE RGBA COMPOSITE (prevents Pillow mask assertion in CI)
+def paste_rgba_safe(base, overlay, pos):
+    base = base.convert("RGBA")
+    overlay = overlay.convert("RGBA")
+
+    tmp = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    tmp.paste(overlay, pos)
+
+    return Image.alpha_composite(base, tmp)
+
+
 # ---------- 1) AUDIO ----------
 gTTS(SCRIPT, slow=False).save("voice_raw.mp3")
 
@@ -284,7 +295,9 @@ def make_brand_overlay():
 
     bar_h = 120
     bar = Image.new("RGBA", (WIDTH, bar_h), (10, 90, 200, 235))
-    img.paste(bar, (0, HEIGHT - bar_h))
+
+    # ✅ FIX: use safe alpha compositing instead of img.paste()
+    img = paste_rgba_safe(img, bar, (0, HEIGHT - bar_h))
 
     size = 34
     while True:
