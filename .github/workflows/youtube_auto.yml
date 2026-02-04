@@ -1,15 +1,13 @@
-name: Brain Fuel YouTube Auto Upload
+name: BrainFuel Auto Shorts
 
 on:
   workflow_dispatch:
   schedule:
-    # Daily at 14:00 UTC (change later)
-    - cron: "0 14 * * *"
+    - cron: "0 14 * * *"  # daily 14:00 UTC
 
 jobs:
-  build-and-upload:
+  build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -19,34 +17,22 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install system packages
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-dejavu-core
 
-      - name: Install Python dependencies (PINNED)
+      - name: Install Python deps (pinned)
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install moviepy==1.0.3 pillow==9.5.0
-          python -m pip install imageio imageio-ffmpeg numpy gtts
+          pip install -r requirements.txt
 
       - name: Generate video
         run: |
           python generate_video.py
 
-      - name: Debug info (size + ffprobe)
-        run: |
-          ls -lah
-          if [ -f brain_fuel_final.mp4 ]; then
-            ls -lah brain_fuel_final.mp4
-            ffprobe -hide_banner -loglevel error -show_format -show_streams brain_fuel_final.mp4 | head -n 160
-          else
-            echo "❌ brain_fuel_final.mp4 not found"
-            exit 1
-          fi
-
-      - name: Upload video artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: brain_fuel_video
+          name: brainfuel_video
           path: brain_fuel_final.mp4
